@@ -394,29 +394,6 @@ namespace Orleans.Runtime
             return !IsGeneratedType(type);
         }
 
-        public static bool IsSystemTargetClass(Type type)
-        {
-            Type systemTargetType;
-            if (!TryResolveType("Orleans.Runtime.SystemTarget", out systemTargetType)) return false;
-
-            var systemTargetInterfaceType = typeof(ISystemTarget);
-            var systemTargetBaseInterfaceType = typeof(ISystemTargetBase);
-#if !NETSTANDARD
-            if (type.Assembly.ReflectionOnly)
-            {
-                systemTargetType = ToReflectionOnlyType(systemTargetType);
-                systemTargetInterfaceType = ToReflectionOnlyType(systemTargetInterfaceType);
-                systemTargetBaseInterfaceType = ToReflectionOnlyType(systemTargetBaseInterfaceType);
-            }
-#endif
-            if (!systemTargetInterfaceType.IsAssignableFrom(type) ||
-                !systemTargetBaseInterfaceType.IsAssignableFrom(type) ||
-                !systemTargetType.IsAssignableFrom(type)) return false;
-
-            // exclude generated classes.
-            return !IsGeneratedType(type);
-        }
-
         public static bool IsConcreteGrainClass(Type type, out IEnumerable<string> complaints, bool complain)
         {
             complaints = null;
@@ -491,7 +468,7 @@ namespace Orleans.Runtime
             var hasCopier = false;
             var hasSerializer = false;
             var hasDeserializer = false;
-            foreach (var method in type.GetMethods(BindingFlags.Static | BindingFlags.Public))
+            foreach (var method in type.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic))
             {
                 hasSerializer |= method.GetCustomAttribute<SerializerMethodAttribute>(false) != null;
                 hasDeserializer |= method.GetCustomAttribute<DeserializerMethodAttribute>(false) != null;

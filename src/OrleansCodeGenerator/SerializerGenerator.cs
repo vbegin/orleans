@@ -84,7 +84,7 @@ namespace Orleans.CodeGenerator
                 GenerateDeserializerMethod(type, fields),
             };
 
-            if (typeInfo.IsConstructedGenericType || !typeInfo.IsGenericTypeDefinition)
+            if (typeInfo.IsConstructedGenericType() || !typeInfo.IsGenericTypeDefinition)
             {
                 members.Add(GenerateRegisterMethod(type));
                 members.Add(GenerateConstructor(className));
@@ -112,7 +112,7 @@ namespace Orleans.CodeGenerator
                         .WithTypeArgumentList(
                             SF.TypeArgumentList()
                                 .AddArguments(
-                                    type.GetGenericArguments()
+                                    type.GetTypeInfo().GetGenericArguments()
                                         .Select(_ => SF.OmittedTypeArgument())
                                         .Cast<TypeSyntax>()
                                         .ToArray()));
@@ -162,7 +162,7 @@ namespace Orleans.CodeGenerator
             var body = new List<StatementSyntax> { resultDeclaration };
 
             // Value types cannot be referenced, only copied, so there is no need to box & record instances of value types.
-            if (!type.IsValueType)
+            if (!type.GetTypeInfo().IsValueType)
             {
                 // Record the result for cyclic deserialization.
                 Expression<Action> recordObject = () => DeserializationContext.Current.RecordObject(default(object));
@@ -264,7 +264,7 @@ namespace Orleans.CodeGenerator
             var resultVariable = SF.IdentifierName("result");
 
             var body = new List<StatementSyntax>();
-            if (type.GetCustomAttribute<ImmutableAttribute>() != null)
+            if (type.GetTypeInfo().GetCustomAttribute<ImmutableAttribute>() != null)
             {
                 // Immutable types do not require copying.
                 body.Add(SF.ReturnStatement(originalVariable));
@@ -390,7 +390,7 @@ namespace Orleans.CodeGenerator
 
                 if (!field.IsSettableProperty)
                 {
-                    if (field.FieldInfo.DeclaringType != null && field.FieldInfo.DeclaringType.IsValueType)
+                    if (field.FieldInfo.DeclaringType != null && field.FieldInfo.DeclaringType.GetTypeInfo().IsValueType)
                     {
                         var setterType =
                             typeof(SerializationManager.ValueTypeSetter<,>).MakeGenericType(
@@ -453,12 +453,12 @@ namespace Orleans.CodeGenerator
             if (typeInfo.IsValueType)
             {
                 // Use the default value.
-                result = SF.DefaultExpression(typeInfo.GetTypeSyntax());
+                result = SF.DefaultExpression(typeInfo.AsType().GetTypeSyntax());
             }
-            else if (type.GetConstructor(Type.EmptyTypes) != null)
+            else if (typeInfo.GetConstructor(Type.EmptyTypes) != null)
             {
                 // Use the default constructor.
-                result = SF.ObjectCreationExpression(typeInfo.GetTypeSyntax()).AddArgumentListArguments();
+                result = SF.ObjectCreationExpression(typeInfo.AsType().GetTypeSyntax()).AddArgumentListArguments();
             }
             else
             {
@@ -473,7 +473,7 @@ namespace Orleans.CodeGenerator
                     type.GetTypeSyntax(),
                     getUninitializedObject.Invoke()
                         .AddArgumentListArguments(
-                            SF.Argument(SF.TypeOfExpression(typeInfo.GetTypeSyntax()))));
+                            SF.Argument(SF.TypeOfExpression(typeInfo.AsType().GetTypeSyntax()))));
             }
 
             return result;
@@ -661,7 +661,8 @@ namespace Orleans.CodeGenerator
                     if (propertyName.Success && this.FieldInfo.DeclaringType != null)
                     {
                         var name = propertyName.Groups[1].Value;
-                        this.property = this.FieldInfo.DeclaringType.GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
+                        this.property = this.FieldInfo.DeclaringType.GetTypeInfo()
+                            .GetProperty(name, BindingFlags.Instance | BindingFlags.Public);
                     }
 
                     return this.property;
@@ -705,12 +706,42 @@ namespace Orleans.CodeGenerator
                     return getValueExpression;
                 }
 
+                // Addressable arguments must be converted to references before passing.
+                // IGrainObserver instances cannot be directly converted to references, therefore they are not included.
+                ExpressionSyntax deepCopyValueExpression;
+                if (typeof(IAddressable).IsAssignableFrom(this.FieldInfo.FieldType)
+                    && this.FieldInfo.FieldType.GetTypeInfo().IsInterface
+                    && !typeof(IGrainObserver).IsAssignableFrom(this.FieldInfo.FieldType))
+                {
+                    var getAsReference = getValueExpression.Member(
+                        (IAddressable grain) => grain.AsReference<IGrain>(),
+                        this.FieldInfo.FieldType);
+
+                    // If the value is not a GrainReference, convert it to a strongly-typed GrainReference.
+                    // C#: !(value is GrainReference) ? value.AsReference<TInterface>() : value;
+                    deepCopyValueExpression =
+                        SF.ConditionalExpression(
+                            SF.PrefixUnaryExpression(
+                                SyntaxKind.LogicalNotExpression,
+                                SF.ParenthesizedExpression(
+                                    SF.BinaryExpression(
+                                        SyntaxKind.IsExpression,
+                                        getValueExpression,
+                                        typeof(GrainReference).GetTypeSyntax()))),
+                            SF.InvocationExpression(getAsReference),
+                            getValueExpression);
+                }
+                else
+                {
+                    deepCopyValueExpression = getValueExpression;
+                }
+
                 // Deep-copy the value.
                 Expression<Action> deepCopyInner = () => SerializationManager.DeepCopyInner(default(object));
                 var typeSyntax = this.FieldInfo.FieldType.GetTypeSyntax();
                 return SF.CastExpression(
                     typeSyntax,
-                    deepCopyInner.Invoke().AddArgumentListArguments(SF.Argument(getValueExpression)));
+                    deepCopyInner.Invoke().AddArgumentListArguments(SF.Argument(deepCopyValueExpression)));
             }
 
             /// <summary>
@@ -731,7 +762,7 @@ namespace Orleans.CodeGenerator
                 }
 
                 var instanceArg = SF.Argument(instance);
-                if (this.FieldInfo.DeclaringType != null && this.FieldInfo.DeclaringType.IsValueType)
+                if (this.FieldInfo.DeclaringType != null && this.FieldInfo.DeclaringType.GetTypeInfo().IsValueType)
                 {
                     instanceArg = instanceArg.WithRefOrOutKeyword(SF.Token(SyntaxKind.RefKeyword));
                 }
